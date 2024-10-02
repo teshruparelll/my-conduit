@@ -2,19 +2,24 @@ name: Resolve Incident In PagerDuty
 on:
   workflow_dispatch:
     inputs:
-      from:
-        description: The email address of a valid user associated with the account making the request.
-        required: true
-        type: string
-      port_context:
+      port_payload:
         required: true
         description: includes blueprint, run ID, and entity identifier from Port.
+
+permissions:
+  contents: read
+  issues: write 
 
 jobs:
   resolve_incident:
     runs-on: ubuntu-latest
+    env:
+      PD_INCIDENT_ID: ${{ fromJson(inputs.port_payload).entity.identifier }}
+      PD_INCIDENT_URL: ${{ fromJson(inputs.port_payload).entity.properties.url }}
+      PD_INCIDENT_TITLE: ${{ fromJson(inputs.port_payload).entity.title }}
+      PORT_INCIDENT_URL: https://app.getport.io/pagerdutyIncidentEntity?identifier=${{ fromJson(inputs.port_payload).entity.identifier }}
+      PORT_RUN_ID: ${{fromJson(inputs.port_payload).run_id}}
     steps:
-      
       - name: Log Executing Request to Resolve Incident
         uses: port-labs/port-github-action@v1
         with:
@@ -22,8 +27,8 @@ jobs:
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.getport.io
           operation: PATCH_RUN
-          runId: ${{fromJson(inputs.port_context).run_id}}
-          logMessage: "About to make a request to pagerduty..."
+          runId: ${{ env.PORT_RUN_ID }}
+          logMessage: "Resloving PagerDuty incident '${{ env.PD_INCIDENT_ID }}'..."
 
       - name: Request to Resolve Incident
         id: resolve_incident
@@ -31,17 +36,19 @@ jobs:
         with:
           url: 'https://api.pagerduty.com/incidents'
           method: 'PUT'
-          customHeaders: '{"Content-Type": "application/json", "Accept": "application/vnd.pagerduty+json;version=2", "Authorization": "Token token=${{ secrets.PAGERDUTY_API_KEY }}", "From": "${{ github.event.inputs.from }}"}'
+          customHeaders: '{"Content-Type": "application/json", "Accept": "application/vnd.pagerduty+json;version=2", "Authorization": "Token token=${{ secrets.PAGERDUTY_API_KEY }}", "From": "hiteshree.ea@gmail.com"}'
           data: >-
               {
                 "incidents": [
                   {
-                    "id": "${{fromJson(inputs.port_context).entity}}",
+                    "id": "${{ env.PD_INCIDENT_ID}}",
                     "type": "incident_reference",
                     "status": "resolved"
                   }
                 ]
               }
+      - run: |
+          echo '${{ steps.resolve_incident.outputs.response }}'
 
       - name: Log Before Processing Incident Response
         uses: port-labs/port-github-action@v1
@@ -50,8 +57,8 @@ jobs:
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.getport.io
           operation: PATCH_RUN
-          runId: ${{fromJson(inputs.port_context).run_id}}
-          logMessage: "Getting incident object from response received ..."
+          runId: ${{ env.PORT_RUN_ID }}
+          logMessage: "Getting incident object from response received..."
 
       - name: Log Before Upserting Entity
         uses: port-labs/port-github-action@v1
@@ -60,15 +67,15 @@ jobs:
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.getport.io
           operation: PATCH_RUN
-          runId: ${{fromJson(inputs.port_context).run_id}}
-          logMessage: "Reporting the updated incident back to port ..."
+          runId: ${{ env.PORT_RUN_ID }}
+          logMessage: "Reporting the updated incident back to Port...🚀"
 
       - name: UPSERT Entity
         uses: port-labs/port-github-action@v1
         with:
           identifier: "${{ fromJson(steps.resolve_incident.outputs.response).incidents[0].id }}"
           title: "${{ fromJson(steps.resolve_incident.outputs.response).incidents[0].title }}"
-          blueprint: ${{fromJson(inputs.port_context).blueprint}}
+          blueprint: ${{fromJson(inputs.port_payload).blueprint}}
           properties: |-
             {
               "status": "${{ fromJson(steps.resolve_incident.outputs.response).incidents[0].status }}",
@@ -79,12 +86,11 @@ jobs:
               "created_at": "${{ fromJson(steps.resolve_incident.outputs.response).incidents[0].created_at }}",
               "updated_at": "${{ fromJson(steps.resolve_incident.outputs.response).incidents[0].updated_at }}"
             }
-          relations: "${{ toJson(fromJson(inputs.port_context).relations) }}"
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.getport.io
           operation: UPSERT
-          runId: ${{fromJson(inputs.port_context).run_id}}
+          runId: ${{ env.PORT_RUN_ID }}
 
       - name: Log After Upserting Entity
         uses: port-labs/port-github-action@v1
@@ -93,5 +99,52 @@ jobs:
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.getport.io
           operation: PATCH_RUN
-          runId: ${{fromJson(inputs.port_context).run_id}}
-          logMessage: "Entity upserting was successful ✅"
+          runId: ${{ env.PORT_RUN_ID }}
+          logMessage: |
+            Entity was updated successfully ✅
+
+            Closing the Github issue...
+
+      - name: Close Issue
+        uses: peter-evans/close-issue@v3
+        with:
+          close-reason: Resolved
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{fromJson(inputs.port_payload).gh_issue_id}}
+          comment: Issue was resolved. Closing ✅
+
+      - name: Log before slack message
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ env.PORT_RUN_ID }}
+          logMessage: |
+            Github issue closed successfully ✅
+
+            Updating the Slack channel that the incident was resolved...
+
+      - name: Send Slack Message
+        uses: archive/github-actions-slack@v2.9.0
+        id: send-message
+        with:
+          slack-function: send-message
+          slack-bot-user-oauth-access-token: ${{ secrets.BOT_USER_OAUTH_TOKEN }}
+          slack-channel: ${{fromJson(inputs.port_payload).slack_channel_id}}
+          slack-text: | 
+            🚀 Incident was resolved 🚀
+            View incident :point_right::skin-tone-4: <${{ env.PORT_INCIDENT_URL }}|here>!
+            Good job everyone, thank you for your help 💪🏻
+
+      - name: Finished handling resolution log
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ env.PORT_RUN_ID }}
+          logMessage: |
+            Incident '${{ env.PD_INCIDENT_ID }}' resolved successfully 💪🏻
