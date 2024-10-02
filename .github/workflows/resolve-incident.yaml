@@ -9,7 +9,7 @@ on:
 permissions:
   contents: read
   issues: write 
-
+  
 jobs:
   resolve_incident:
     runs-on: ubuntu-latest
