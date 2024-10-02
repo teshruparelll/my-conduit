@@ -1,0 +1,159 @@
+name: Change Who is On Call In PagerDuty
+on:
+  workflow_dispatch:
+    inputs:
+      start_time:
+        description: The start time for the override, in ISO 8601 format (e.g., 2023-01-01T01:00:00Z)
+        required: true
+        type: string
+      end_time:
+        description: The end time for the override, in ISO 8601 format (e.g., 2023-01-01T01:00:00Z).
+        required: true
+        type: string
+      new_on_call_user:
+        description: The email of the user who will be taking over the on-call duty
+        required: true
+        type: string
+      port_context:
+        required: true
+        description: includes blueprint, run ID, and entity identifier from Port.
+
+jobs:
+  change-on-call-user:
+    runs-on: ubuntu-latest
+    steps:
+      
+      - name: Inform searching of user in user list
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{fromJson(inputs.port_context).run_id}}
+          logMessage: "Searching for user in organization user list... ⛴️"
+
+      - name: Search for user id among user list
+        id: search_for_user_id
+        uses: fjogeleit/http-request-action@v1
+        with:
+          url: "https://api.pagerduty.com/users?query=${{ github.event.inputs.new_on_call_user }}"
+          method: "GET"
+          customHeaders: '{"Content-Type": "application/json", "Authorization": "Token token=${{ secrets.PAGERDUTY_API_KEY }}"}'
+
+      - name: Retrieve user list from search
+        id: user_id_from_search
+        if: steps.search_for_user_id.outcome == 'success'
+        run: |
+          user_id=$(echo '${{ steps.search_for_user_id.outputs.response }}' | jq -r '.users | if length > 0 then .[0].id else "empty" end')
+          echo "user_id=${user_id}" >> $GITHUB_OUTPUT
+
+      - name: Inform user existence
+        if: steps.user_id_from_search.outputs.user_id != 'empty'
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{fromJson(inputs.port_context).run_id}}
+          logMessage: |
+            User found 🥹, Changing On-Call to ${{ inputs.new_on_call_user }}... ⛴️
+      
+      - name: Inform user inexistence
+        if: steps.user_list_from_search.outputs.selected_user_id == 'empty'
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{fromJson(inputs.port_context).run_id}}
+          logMessage: |
+            User not found 😭 Skipping assignment... ⛴️
+  
+      - name: Change Who is On-Call in PagerDuty
+        if: steps.user_id_from_search.outputs.user_id != 'empty'
+        id: change_on_call_user
+        uses: fjogeleit/http-request-action@v1
+        with:
+          url: "https://api.pagerduty.com/schedules/${{fromJson(inputs.port_context).entity}}/overrides"
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json", "Accept": "application/json", "Authorization": "Token token=${{ secrets.PAGERDUTY_API_KEY }}"}'
+          data: >-
+            {
+              "overrides": [
+                {
+                  "start": "${{ github.event.inputs.start_time }}",
+                  "end": "${{ github.event.inputs.end_time }}",
+                  "user": {
+                    "id": "${{ steps.user_id_from_search.outputs.user_id }}",
+                    "type": "user_reference" 
+                  },
+                  "time_zone": "UTC"
+                }
+              ]
+            }
+
+      - name: Log Before Requesting for Updated Schedule
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{fromJson(inputs.port_context).run_id}}
+          logMessage: "Getting updated schedule from pagerduty ..."
+
+      - name: Request For Changed Schedule
+        id: new_schedule
+        uses: fjogeleit/http-request-action@v1
+        with:
+          url: 'https://api.pagerduty.com/schedules/${{fromJson(inputs.port_context).entity}}'
+          method: 'GET'
+          customHeaders: '{"Content-Type": "application/json", "Accept": "application/json", "Authorization": "Token token=${{ secrets.PAGERDUTY_API_KEY }}"}'
+
+      - name: Extract Users From New Schedule
+        id: extract_users
+        run: |
+          USERS_JSON=$(echo '${{ steps.new_schedule.outputs.response }}' | jq -c '[.schedule.users[].summary]')
+          echo "user_summaries=$USERS_JSON" >> $GITHUB_ENV
+        shell: bash
+  
+      - name: Log Before Upserting Schedule to Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{fromJson(inputs.port_context).run_id}}
+          logMessage: "Ingesting updated schedule to port..."
+          
+      - name: UPSERT Entity
+        uses: port-labs/port-github-action@v1
+        with:
+          identifier: "${{ fromJson(steps.new_schedule.outputs.response).schedule.id }}"
+          title: "${{ fromJson(steps.new_schedule.outputs.response).schedule.name }}"
+          blueprint: ${{fromJson(inputs.port_context).blueprint}}
+          properties: |-
+            {
+              "url": "${{ fromJson(steps.new_schedule.outputs.response).schedule.html_url }}",
+              "timezone": "${{ fromJson(steps.new_schedule.outputs.response).schedule.time_zone }}",
+              "description": "${{ fromJson(steps.new_schedule.outputs.response).schedule.description}}",
+              "users": ${{ env.user_summaries }}
+            }
+          relations: "${{ toJson(fromJson(inputs.port_context).relations) }}"
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          runId: ${{fromJson(inputs.port_context).run_id}}
+
+      - name: Log After Upserting Entity
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{fromJson(inputs.port_context).run_id}}
+          logMessage: "Entity upserting was successful ✅"
