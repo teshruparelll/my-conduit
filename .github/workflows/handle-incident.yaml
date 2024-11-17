@@ -175,7 +175,7 @@ jobs:
             }
           relations: | 
             {
-              "githubIssue": "${{ steps.get-service-info.outputs.SERVICE_IDENTIFIER }}-${{ steps.create-github-issue.outputs.number }}",
+              
               "service": "${{ steps.get-service-info.outputs.SERVICE_IDENTIFIER }}"
             }
 
