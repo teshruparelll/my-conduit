@@ -141,7 +141,7 @@ jobs:
               "description": "${{ fromJson(steps.new_schedule.outputs.response).schedule.description}}",
               "users": ${{ env.user_summaries }}
             }
-          relations: "${{ toJson(fromJson(inputs.port_context).relations) }}"
+          
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.getport.io
